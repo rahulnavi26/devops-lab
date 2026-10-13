@@ -1,0 +1,44 @@
+# Installs Prometheus + Grafana.   ansible-playbook -i inventory.ini monitoring.yml
+#   optional: GRAFANA_ADMIN_PASSWORD=... (default: admin - change it!)
+- name: Deploy monitoring stack
+  hosts: all
+  vars:
+    manifests_dir: "{{ ansible_env.HOME }}/devops-lab/k8s"
+    files_dir: "{{ ansible_env.HOME }}/devops-lab/monitoring"
+    grafana_password: "{{ lookup('env', 'GRAFANA_ADMIN_PASSWORD') | default('admin', true) }}"
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  tasks:
+    - name: Copy manifests and monitoring files
+      ansible.builtin.copy:
+        src: "{{ item.src }}"
+        dest: "{{ item.dest }}"
+        mode: preserve
+      loop:
+        - {src: "{{ playbook_dir }}/../k8s/", dest: "{{ manifests_dir }}/"}
+        - {src: "{{ playbook_dir }}/../monitoring/alerts.yml", dest: "{{ files_dir }}/alerts.yml"}
+        - {src: "{{ playbook_dir }}/../monitoring/dashboards/devops-lab.json", dest: "{{ files_dir }}/devops-lab.json"}
+
+    - name: Create the monitoring namespace
+      ansible.builtin.shell: kubectl create namespace monitoring --dry-run=client -o yaml | kubectl apply -f -
+      changed_when: false
+
+    - name: Create rules, dashboard and admin secret
+      ansible.builtin.shell: |
+        set -o pipefail
+        kubectl -n monitoring create configmap prometheus-rules --from-file=alerts.yml={{ files_dir }}/alerts.yml --dry-run=client -o yaml | kubectl apply -f -
+        kubectl -n monitoring create configmap grafana-dashboards --from-file=devops-lab.json={{ files_dir }}/devops-lab.json --dry-run=client -o yaml | kubectl apply -f -
+        kubectl -n monitoring create secret generic grafana-admin --from-literal=password='{{ grafana_password }}' --dry-run=client -o yaml | kubectl apply -f -
+      args:
+        executable: /bin/bash
+      no_log: true
+      changed_when: false
+
+    - name: Apply Prometheus and Grafana
+      ansible.builtin.command: kubectl apply -f {{ manifests_dir }}/monitoring/monitoring.yaml
+      changed_when: false
+
+    - name: Wait for both deployments
+      ansible.builtin.command: kubectl -n monitoring rollout status deployment/{{ item }} --timeout=240s
+      loop: [prometheus, grafana]
+      changed_when: false

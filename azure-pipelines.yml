@@ -1,0 +1,110 @@
+# Azure Pipelines. One-time setup:
+#  1. Pipelines > Library > Variable group "devops-lab-secrets" containing (mark secrets with the lock icon):
+#       AWS_ACCESS_KEY_ID(secret) AWS_SECRET_ACCESS_KEY(secret) AWS_REGION
+#       ACR_LOGIN_SERVER ACR_USERNAME ACR_PASSWORD(secret)
+#       DOCKERHUB_USERNAME DOCKERHUB_TOKEN(secret)
+#       SONAR_HOST_URL SONAR_TOKEN(secret)   DEPLOY_HOST
+#  2. Pipelines > Library > Secure files: upload your VM private key as  deploy_key.pem
+#  3. Pipelines > Environments: create "devops-lab-prod" (add an Approval check for a manual gate)
+trigger:
+  branches:
+    include: [main]
+pr:
+  branches:
+    include: [main]
+
+parameters:
+  - name: cloud
+    displayName: Registry / cloud
+    type: string
+    default: aws
+    values: [aws, azure, dockerhub]
+  - name: deploy
+    displayName: Deploy after pushing
+    type: boolean
+    default: true
+
+variables:
+  - group: devops-lab-secrets
+  - name: CLOUD
+    value: ${{ parameters.cloud }}
+
+pool:
+  vmImage: ubuntu-latest
+
+stages:
+  - stage: Test
+    jobs:
+      - job: Test
+        steps:
+          - checkout: self
+            fetchDepth: 0
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: "3.12"
+          - script: scripts/ci/test.sh
+            displayName: Unit tests + coverage
+          - script: scripts/ci/sonar.sh
+            displayName: SonarQube scan + quality gate (skipped if not configured)
+            env:
+              SONAR_HOST_URL: $(SONAR_HOST_URL)
+              SONAR_TOKEN: $(SONAR_TOKEN)
+          - task: PublishTestResults@2
+            condition: always()
+            inputs:
+              testResultsFiles: reports/junit.xml
+              testResultsFormat: JUnit
+
+  - stage: Build
+    dependsOn: Test
+    jobs:
+      - job: BuildScanPush
+        steps:
+          - checkout: self
+          - script: scripts/ci/build.sh
+            displayName: Build image
+          - script: scripts/ci/scan.sh
+            displayName: Trivy scan (gate)
+          - publish: reports/trivy.json
+            artifact: trivy-report
+            condition: always()
+          - script: scripts/ci/push.sh
+            displayName: Push to registry
+            condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))
+            env:
+              AWS_REGION: $(AWS_REGION)
+              AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
+              AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
+              ACR_LOGIN_SERVER: $(ACR_LOGIN_SERVER)
+              ACR_USERNAME: $(ACR_USERNAME)
+              ACR_PASSWORD: $(ACR_PASSWORD)
+              DOCKERHUB_USERNAME: $(DOCKERHUB_USERNAME)
+              DOCKERHUB_TOKEN: $(DOCKERHUB_TOKEN)
+
+  - stage: Deploy
+    dependsOn: Build
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'), ne(variables['Build.Reason'], 'PullRequest'), eq('${{ parameters.deploy }}', 'true'))
+    jobs:
+      - deployment: Deploy
+        environment: devops-lab-prod
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+                - task: DownloadSecureFile@1
+                  name: sshKey
+                  inputs:
+                    secureFile: deploy_key.pem
+                - script: |
+                    chmod 600 "$(sshKey.secureFilePath)"
+                    SSH_KEY_FILE="$(sshKey.secureFilePath)" scripts/ci/deploy.sh
+                  displayName: Deploy with Ansible
+                  env:
+                    DEPLOY_HOST: $(DEPLOY_HOST)
+                    AWS_REGION: $(AWS_REGION)
+                    AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
+                    AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
+                    ACR_LOGIN_SERVER: $(ACR_LOGIN_SERVER)
+                    ACR_USERNAME: $(ACR_USERNAME)
+                    ACR_PASSWORD: $(ACR_PASSWORD)

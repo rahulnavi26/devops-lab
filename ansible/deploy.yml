@@ -1,0 +1,65 @@
+# Deploys the application image. Called by every CI pipeline through scripts/ci/deploy.sh
+#   ansible-playbook -i inventory.ini deploy.yml -e image=<registry>/devops-lab:<tag> -e image_tag=<tag>
+- name: Deploy devops-lab to Kubernetes
+  hosts: all
+  vars:
+    manifests_dir: "{{ ansible_env.HOME }}/devops-lab/k8s"
+    registry_server: "{{ lookup('env', 'REGISTRY_SERVER') }}"
+    registry_user: "{{ lookup('env', 'REGISTRY_USER') }}"
+    registry_password: "{{ lookup('env', 'REGISTRY_PASSWORD') }}"
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  tasks:
+    - name: Copy Kubernetes manifests to the node
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../k8s/"
+        dest: "{{ manifests_dir }}/"
+        mode: preserve
+
+    - name: Create namespace
+      ansible.builtin.command: kubectl apply -f {{ manifests_dir }}/app/namespace.yaml
+      changed_when: false
+
+    - name: Create or refresh the image pull secret
+      ansible.builtin.shell: |
+        set -o pipefail
+        kubectl -n devops-lab create secret docker-registry regcred \
+          --docker-server="{{ registry_server }}" \
+          --docker-username="{{ registry_user }}" \
+          --docker-password="{{ registry_password }}" \
+          --dry-run=client -o yaml | kubectl apply -f -
+      args:
+        executable: /bin/bash
+      no_log: true
+      when: registry_password | length > 0
+
+    - name: Apply the Deployment with the new image
+      ansible.builtin.shell: |
+        set -o pipefail
+        envsubst '${IMAGE} ${IMAGE_TAG}' < {{ manifests_dir }}/app/deployment.yaml | kubectl apply -f -
+      args:
+        executable: /bin/bash
+      environment:
+        IMAGE: "{{ image }}"
+        IMAGE_TAG: "{{ image_tag }}"
+
+    - name: Apply Service and autoscaler
+      ansible.builtin.command: kubectl apply -f {{ manifests_dir }}/app/service.yaml -f {{ manifests_dir }}/app/hpa.yaml
+      changed_when: false
+
+    - name: Wait for the rollout to finish
+      ansible.builtin.command: kubectl -n devops-lab rollout status deployment/devops-lab --timeout=180s
+      changed_when: false
+
+    - name: Smoke test through the NodePort
+      ansible.builtin.uri:
+        url: http://localhost:30080/health
+        return_content: true
+      register: smoke
+      retries: 10
+      delay: 3
+      until: smoke.status == 200
+
+    - name: Show result
+      ansible.builtin.debug:
+        msg: "Healthy: {{ smoke.content }}"

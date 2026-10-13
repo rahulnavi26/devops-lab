@@ -1,0 +1,28 @@
+# Local CI tooling: Jenkins + SonarQube.   cd tools && docker compose up -d --build
+# Linux hosts first run:  sudo sysctl -w vm.max_map_count=524288   (SonarQube requirement)
+services:
+  jenkins:
+    build: ./jenkins
+    user: root # lab only: lets Jenkins use the Docker socket
+    ports:
+      - "8080:8080"
+    volumes:
+      - jenkins_home:/var/jenkins_home
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      - sonarqube
+
+  sonarqube:
+    image: sonarqube:community
+    ports:
+      - "9000:9000"
+    volumes:
+      - sonar_data:/opt/sonarqube/data
+      - sonar_extensions:/opt/sonarqube/extensions
+      - sonar_logs:/opt/sonarqube/logs
+
+volumes:
+  jenkins_home:
+  sonar_data:
+  sonar_extensions:
+  sonar_logs:

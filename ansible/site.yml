@@ -1,0 +1,7 @@
+# Turns a fresh Ubuntu VM into a single-node Kubernetes cluster.
+#   ansible-playbook -i inventory.ini site.yml
+- name: Prepare the Kubernetes node
+  hosts: all
+  roles:
+    - common
+    - k3s

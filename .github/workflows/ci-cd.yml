@@ -1,0 +1,95 @@
+name: ci-cd
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      cloud:
+        description: Registry / cloud to use
+        type: choice
+        options: [aws, azure, dockerhub]
+        default: aws
+      deploy:
+        description: Deploy to the VM after pushing
+        type: boolean
+        default: true
+
+concurrency:
+  group: ci-cd-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # Repository VARIABLES (Settings > Secrets and variables > Actions > Variables)
+  CLOUD: ${{ inputs.cloud || vars.CLOUD || 'aws' }}
+  AWS_REGION: ${{ vars.AWS_REGION || 'ap-south-1' }}
+  SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL }}
+  DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+  ACR_LOGIN_SERVER: ${{ vars.ACR_LOGIN_SERVER }}
+  # Repository SECRETS
+  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+  ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
+  ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
+  DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+  DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+  SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+  # Push/deploy only after you have configured the secrets: manual runs always, pushes only when ENABLE_CD=true
+  PUBLISH: ${{ github.event_name != 'pull_request' && (github.event_name == 'workflow_dispatch' || vars.ENABLE_CD == 'true') }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # SonarQube needs full history
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Unit tests + coverage
+        run: scripts/ci/test.sh
+      - name: SonarQube scan + quality gate (skipped if SONAR_* not set)
+        run: scripts/ci/sonar.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-reports
+          path: |
+            coverage.xml
+            reports/
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: scripts/ci/build.sh
+      - name: Trivy scan (gate)
+        run: scripts/ci/scan.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: trivy-report
+          path: reports/trivy.json
+      - name: Push to registry
+        if: env.PUBLISH == 'true'
+        run: scripts/ci/push.sh
+
+  deploy:
+    needs: build
+    if: ${{ github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && (github.event_name == 'push' && vars.ENABLE_CD == 'true' || inputs.deploy) }}
+    runs-on: ubuntu-latest
+    environment: production # add required reviewers on this environment for a manual approval gate
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy with Ansible
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          install -m 600 /dev/null "$RUNNER_TEMP/key.pem"
+          printf '%s\n' "$SSH_PRIVATE_KEY" > "$RUNNER_TEMP/key.pem"
+          SSH_KEY_FILE="$RUNNER_TEMP/key.pem" scripts/ci/deploy.sh

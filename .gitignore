@@ -1,0 +1,19 @@
+.venv/
+.ci/
+__pycache__/
+.pytest_cache/
+coverage.xml
+.coverage
+reports/
+.scannerwork/
+*.pem
+*.key
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+terraform.tfvars
+crash.log
+# Ansible
+ansible/inventory.ini

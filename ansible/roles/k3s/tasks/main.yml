@@ -1,0 +1,19 @@
+- name: Install k3s (single-node Kubernetes)
+  ansible.builtin.shell: |
+    set -o pipefail
+    curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION="{{ k3s_version }}" sh -s - \
+      --write-kubeconfig-mode 644 --disable traefik
+  args:
+    executable: /bin/bash
+    creates: /usr/local/bin/k3s
+  become: true
+
+- name: Wait until the node is Ready
+  ansible.builtin.command: kubectl wait --for=condition=Ready node --all --timeout=30s
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: node_ready
+  retries: 10
+  delay: 10
+  until: node_ready.rc == 0
+  changed_when: false
